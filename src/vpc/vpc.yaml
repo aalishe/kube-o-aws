@@ -1,0 +1,420 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: kube-aws-secure VPC (Public and Private Subnets, IGW, Route Tables, KMS)
+
+Parameters:
+  Role:
+    Type: String
+  ServiceNamePrefix:
+    Type: String
+  KubernetesCluster:
+    Type: String
+
+  InstanceType:
+    Description: EC2 HVM instance type.
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+    - t2.micro
+    - t2.small
+    - t2.medium
+    ConstraintDescription: Must be a valid EC2 HVM instance type.
+  KeyPair:
+    Description: The name of an EC2 Key Pair to allow SSH access to the instance.
+    Default: key_name
+    Type: String
+
+Mappings:
+  ConfigMap:
+    Environment:
+      VPC:            VPC_CIDR
+
+      PublicSubnetA:  PUBLIC_SUBNET_A_CIDR
+      PublicSubnetB:  PUBLIC_SUBNET_B_CIDR
+      PublicSubnetC:  PUBLIC_SUBNET_C_CIDR
+
+      PrivateSubnetA: PRIVATE_SUBNET_A_CIDR
+      PrivateSubnetB: PRIVATE_SUBNET_B_CIDR
+      PrivateSubnetC: PRIVATE_SUBNET_C_CIDR
+
+      FnGetAZs:       ["aws_regiona", "aws_regionb", "aws_regionc"]
+
+Resources:
+  #KMS
+  KubeAwsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: "KubeAWS KMS key"
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: !Sub "key-k8s"
+        Statement:
+          - Sid: "Enable IAM User Permissions"
+            Effect: "Allow"
+            Principal:
+              AWS: !Sub "arn:aws:sts::${AWS::AccountId}:root"
+            Action:
+              - "kms:*"
+            Resource: "*"
+  # VPC
+  KubeAwsVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock:          !FindInMap [ConfigMap, Environment, VPC]
+      EnableDnsSupport:   true
+      EnableDnsHostnames: true
+      InstanceTenancy:    default
+      Tags:
+        - Key:   Name
+          Value: !Ref ServiceNamePrefix
+        - Key:   Role
+          Value: !Ref Role
+
+#DHCP Options
+  KubeDhcpOptions:
+    Type: "AWS::EC2::DHCPOptions"
+    Properties:
+      DomainName: ec2.internal
+      DomainNameServers:
+        - AmazonProvidedDNS
+      Tags:
+        - Key:   Name
+          Value: !Sub "${ServiceNamePrefix}-dhcp-options"
+        - Key:   Role
+          Value: !Ref Role
+
+  KubeVPCDHCPOptionsAssociation:
+    Type: AWS::EC2::VPCDHCPOptionsAssociation
+    Properties:
+      VpcId:
+        Ref: KubeAwsVPC
+      DhcpOptionsId:
+        Ref: KubeDhcpOptions
+
+  # IGW
+  PublicInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key:   Name
+          Value: !Sub "${ServiceNamePrefix}-igw"
+        - Key:   Role
+          Value: !Ref Role
+
+  PublicVPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:             !Ref KubeAwsVPC
+      InternetGatewayId: !Ref PublicInternetGateway
+
+  # Nat GW
+
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId:     !Ref PublicSubnetA
+
+  PublicVPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:             !Ref KubeAwsVPC
+      InternetGatewayId: !Ref PublicInternetGateway
+
+  ### Public Subnets
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:               !Ref KubeAwsVPC
+      CidrBlock:           !FindInMap [ConfigMap, Environment, PublicSubnetA]
+      MapPublicIpOnLaunch: true
+      AvailabilityZone:    !Select [0, !FindInMap [ConfigMap, Environment, FnGetAZs]]
+      Tags:
+        - Key:   Name
+          Value: !Sub "${ServiceNamePrefix}-public-subnet-a"
+        - Key:   Role
+          Value: !Ref Role
+        - Key:   KubernetesCluster
+          Value: !Ref KubernetesCluster
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:               !Ref KubeAwsVPC
+      CidrBlock:           !FindInMap [ConfigMap, Environment, PublicSubnetB]
+      MapPublicIpOnLaunch: true
+      AvailabilityZone:    !Select [1, !FindInMap [ConfigMap, Environment, FnGetAZs]]
+      Tags:
+        - Key:   Name
+          Value: !Sub "${ServiceNamePrefix}-public-subnet-b"
+        - Key:   Role
+          Value: !Ref Role
+        - Key:   KubernetesCluster
+          Value: !Ref KubernetesCluster
+
+  PublicSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:               !Ref KubeAwsVPC
+      CidrBlock:           !FindInMap [ConfigMap, Environment, PublicSubnetC]
+      MapPublicIpOnLaunch: true
+      AvailabilityZone:    !Select [2, !FindInMap [ConfigMap, Environment, FnGetAZs]]
+      Tags:
+        - Key:   Name
+          Value: !Sub "${ServiceNamePrefix}-public-subnet-c"
+        - Key:   Role
+          Value: !Ref Role
+        - Key:   KubernetesCluster
+          Value: !Ref KubernetesCluster
+
+  ### Private Subnets
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:            !Ref KubeAwsVPC
+      CidrBlock:        !FindInMap [ConfigMap, Environment, PrivateSubnetA]
+      AvailabilityZone: !Select [0, !FindInMap [ConfigMap, Environment, FnGetAZs]]
+      Tags:
+        - Key:   Name
+          Value: !Sub "${ServiceNamePrefix}-private-subnet-a"
+        - Key:   Role
+          Value: !Ref Role
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:            !Ref KubeAwsVPC
+      CidrBlock:        !FindInMap [ConfigMap, Environment, PrivateSubnetB]
+      AvailabilityZone: !Select [1, !FindInMap [ConfigMap, Environment, FnGetAZs]]
+      Tags:
+        - Key:   Name
+          Value: !Sub "${ServiceNamePrefix}-private-subnet-b"
+        - Key:   Role
+          Value: !Ref Role
+
+  PrivateSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:            !Ref KubeAwsVPC
+      CidrBlock:        !FindInMap [ConfigMap, Environment, PrivateSubnetC]
+      AvailabilityZone: !Select [2, !FindInMap [ConfigMap, Environment, FnGetAZs]]
+      Tags:
+        - Key:   Name
+          Value: !Sub "${ServiceNamePrefix}-private-subnet-c"
+        - Key:   Role
+          Value: !Ref Role
+
+  ### Public Route Table
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref KubeAwsVPC
+
+      Tags:
+        - Key:   Name
+          Value: !Sub "${ServiceNamePrefix}-public-routes"
+        - Key:   Role
+          Value: !Ref Role
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId:     !Ref PublicSubnetA
+
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId:     !Ref PublicSubnetB
+
+  PublicSubnetCRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId:     !Ref PublicSubnetC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:         !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:            !Ref PublicInternetGateway
+
+  ### Private Route Table
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref KubeAwsVPC
+
+      Tags:
+        - Key:   Name
+          Value: !Sub "${ServiceNamePrefix}-private-routes"
+        - Key:   Role
+          Value: !Ref Role
+
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId:     !Ref PrivateSubnetA
+
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId:     !Ref PrivateSubnetB
+
+  PrivateSubnetCRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId:     !Ref PrivateSubnetC
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId:         !Ref PrivateRouteTable
+      NatGatewayId:         !Ref NATGateway
+
+
+#VPN
+  VpnAddress:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  AssociateVpnAddress:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt VpnAddress.AllocationId
+      NetworkInterfaceId: !Ref eth0
+  SSHSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref KubeAwsVPC
+      GroupDescription: Enable SSH access via port 22 from current IP
+      SecurityGroupIngress:
+      - CidrIp: my_ip/32
+        FromPort: 22
+        IpProtocol: tcp
+        ToPort: 22
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref KubeAwsVPC
+      GroupDescription: Enable HTTPS access from current IP
+      SecurityGroupIngress:
+      - CidrIp: my_ip/32
+        FromPort: 443
+        IpProtocol: tcp
+        ToPort: 443
+  VPNSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref KubeAwsVPC
+      GroupDescription: Enable VPN access via port 12777 from everywhere
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: 12777
+        IpProtocol: udp
+        ToPort: 12777
+  LESecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref KubeAwsVPC
+      GroupDescription: Allow LetsEncrypt to verify the host
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: 80
+        IpProtocol: tcp
+        ToPort: 80
+  eth0:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      Description: Vpn interface
+      GroupSet:
+      - !Ref SSHSecurityGroup
+      - !Ref WebSecurityGroup
+      - !Ref VPNSecurityGroup
+      - !Ref LESecurityGroup
+      SourceDestCheck: true
+      Tags:
+        -
+          Key: Network
+          Value: Control
+  Ec2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami_id
+      KeyName: !Ref KeyPair
+      InstanceType: !Ref InstanceType
+      NetworkInterfaces:
+        -
+          NetworkInterfaceId: !Ref eth0
+          DeviceIndex: 0
+      Tags:
+        -
+          Key: Role
+          Value: Vpn
+      UserData: H4sICKHlBVoAA3VzZXJkYXRhLnlhbWwAvVVJb9QwFL7Pr3ikPcDBk6mEQArygYoicQBVlOVQKuQ4LxNrYjvYTmZG4sdjZ9eQ0sKBHLK89fNbvpzxUtcZ4VrlYrvi2qC2yQqgrjLmMLwBGEy1dsQ640XbYwKRzvMoGCnhbGdDQDGJCVRGuFqVa4umERxbHQAqlpZe60w9iLiWkqksAeuYcaNQOVQugZ+9AOD2s09yN36+QcuNqJzQil53ueDL9YdR/xF/1MKgpZnmOzQnOABe5w4NbZghpUjJgFbqWrnVlPOm85rSXh2Q3wSg1wYpiWtr4lSoWO4yYYBUEPuIsY8Y9xGH578HkFptdZb+HoCOzt0RwdQKvo12w0VIaAjtwy0aZOgYLxZV3q0RJW4xWw6Nbq/NjhbaukUD34EWKyv37GiXTJp7j5yMil7wSPf+mZwqFtw5k2JyuFhvZvMzB34qvkFOX2zsbFLeKa8oy2lSvjI/wtnlkcq6dILUfgDX3nWL/XwNi7I8gl2MxXV5aDMuMffbS08XcDJ/HzLMgBbMz1KGTXxoMj4To49yWsNR/elYIcWDe/6nGvRLGKqwCGeogQcsmRtKQBpd1hL/C3W8bTPbga4AUwtd+hOm8PUhoT5r/zLnkYln7jHo2/HXTNMWWCu0hXazbJIJ1SK6OghHjziN5owYdOVaYgj9IX1xu1MRrTjC1O3HNe8e8Hv/id9zzw8t+ROomCsSeCh9m6FCI4W1vgc2gc3LTbd5eq/QJGD8byYJt9ViR8+etOFTZgsgQ6VFDre3EJ0/3YsKcwtEBTo9v4CfsDVYQQDzLAJKIYrg7u6VK1CNZ5W73K6DhXcY5q20UxORFxqi7gwhprDASoMsO/az61c96q1zsfoFsiL7OE0HAAA=
+  DataVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      Size: 5
+      AvailabilityZone: !GetAtt Ec2Instance.AvailabilityZone
+  MountPoint:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref Ec2Instance
+      VolumeId: !Ref DataVolume
+      Device: /dev/xvdc
+  VpnDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: domain_name.
+      Name: k8svpn.domain_name.
+      Type: A
+      TTL: '300'
+      ResourceRecords:
+      - !Ref VpnAddress
+
+Outputs:
+  VpnDNSReccord:
+    Value: !Ref VpnDNSRecord
+
+  VpnIpAddress:
+    Value: !Ref VpnAddress
+
+  VpcId:
+    Value: !Ref KubeAwsVPC
+
+  CidrBlock:
+    Value: !GetAtt KubeAwsVPC.CidrBlock
+
+  PublicRouteTableId:
+    Value: !Ref PublicRouteTable
+  PrivateRouteTableId:
+    Value: !Ref PrivateRouteTable
+
+  PublicSubnetAId:
+    Value: !Ref PublicSubnetA
+  PublicSubnetBId:
+    Value: !Ref PublicSubnetB
+  PublicSubnetCId:
+    Value: !Ref PublicSubnetC
+
+  PrivateSubnetAId:
+    Value: !Ref PrivateSubnetA
+  PrivateSubnetBId:
+    Value: !Ref PrivateSubnetB
+  PrivateSubnetCId:
+    Value: !Ref PrivateSubnetC
+
+  KMSKeyArn:
+    Value: !GetAtt KubeAwsKey.Arn

@@ -1,0 +1,589 @@
+#!/bin/bash
+
+# Input Variables:
+# Env variable      | Command flag  | Required
+# ----------------------------------------------
+# KAWS_KEY_NAME     | --key-pair    |    YES
+# KAWS_DOMAIN_NAME  | --domain      |    YES
+# KAWS_BUCKET       | --bucket      |    YES
+# KAWS_AWS_PROFILE  | --profile     |    NO
+# KAWS_AWS_REGION   |               |    NO
+# KAWS_STACK_NAME   | --stack       |    NO
+# ----------------------------------------------
+
+# Input variables can be defined in the kaws.conf file
+[[ -f ./kaws.conf ]] && source ./kaws.conf
+
+# Default Values
+# ------------------------------------------------------------------------------
+DEFAULT_VPC_CIDR=10.0.0.0/16
+DEFAULT_PRIVATE_SUBNET_A_CIDR=10.0.1.0/24
+DEFAULT_PRIVATE_SUBNET_B_CIDR=10.0.2.0/24
+DEFAULT_PRIVATE_SUBNET_C_CIDR=10.0.3.0/24
+DEFAULT_PUBLIC_SUBNET_A_CIDR=10.0.101.0/24
+DEFAULT_PUBLIC_SUBNET_B_CIDR=10.0.102.0/24
+DEFAULT_PUBLIC_SUBNET_C_CIDR=10.0.103.0/24
+
+DEFAULT_AWS_PROFILE=default
+DEFAULT_STACK_NAME=Kubernetes
+
+: ${KAWS_AWS_PROFILE:=$DEFAULT_AWS_PROFILE}
+: ${KAWS_STACK_NAME:=$DEFAULT_STACK_NAME}
+
+# Global Variables
+# ------------------------------------------------------------------------------
+C_STD="\033[0m"
+C_RED="\033[31m"
+C_GREEN="\033[32m"
+C_YELLOW="\033[33m"
+C_BLUE="\033[34m"
+C_PURPLE="\033[35m"
+C_WHITEBOLD="\033[97;1m"
+I_CROSS="\xe2\x95\xb3"
+I_CHECK="\xe2\x9c\x94"
+I_BULLET="\xe2\x80\xa2"
+
+SCRIPT_DIR="$( cd "$( dirname "$0" )" && pwd )"
+SCRIPT_NAME="$( basename "$0" )"
+
+# Enable debug with '--debug' parameter
+DEBUG=0
+
+# UI functions
+# ------------------------------------------------------------------------------
+error() {
+  echo -e "${C_RED}[ERROR]${C_STD}  $1"
+  [[ $2 == '-ec' ]] && exit $3
+}
+
+ok() {
+  echo -e "${C_GREEN}[ OK ]${C_STD}  $1"
+}
+
+debug() {
+  (( ${DEBUG} )) && echo -e "${C_PURPLE}[DEBUG]${C_STD}  ${1}"
+}
+
+# Validation functions
+# ------------------------------------------------------------------------------
+check_requirements() {
+  debug "Checking requirements:"
+  
+  # Commands:
+  err=
+  for cmd in kube-aws kubectl jq aws; do
+    if [[ -z $(command -v ${cmd} 2>/dev/null) ]]; then
+      error "${C_YELLOW}${cmd}${C_STD} not found"
+      err="${C_YELLOW}${cmd}${C_STD}, ${err}"
+    else 
+      debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}${cmd}${C_STD} installed"
+    fi
+  done
+  [[ -n ${err} ]] && echo -ne "\nInstall the following commands: ${err%, }\n" && exit 1
+
+  # AWS Configuration
+  if [[ ! -f ~/.aws/config ]]; then
+    error "AWS is not configured"
+    echo -ne "\nConfigure AWS with ${C_YELLOW}aws configure${C_STD}\n"
+    exit 1
+  else
+    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}aws${C_STD} configured"
+  fi
+
+  # KAWS Configuration
+  err=
+  for param in KAWS_KEY_NAME KAWS_DOMAIN_NAME KAWS_BUCKET; do
+    eval p=\$${param}
+    if [[ -z ${p} ]]; then
+      error "${C_YELLOW}${param}${C_STD} cannot be empty"
+      err="${C_YELLOW}${param}${C_STD}, ${err}"
+    else
+      debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}${param}${C_STD} = ${p}"
+    fi
+  done
+  [[ -n ${err} ]] && echo -ne "\nAssign a value to the following environment variables: ${err%, }\n" && exit 1
+}
+
+list_profiles() {
+  echo "Profiles:"
+  cat ~/.aws/config | grep "\[" | tr -d '[]' | cut -d " " -f 2 | while read profile
+  do 
+    echo -e "${C_GREEN}${I_BULLET}${C_STD}  ${profile}"
+  done
+}
+
+check_profile() {
+  if [[ -z ${KAWS_AWS_PROFILE} ]]; then
+    error "the AWS profile cannot be empty. assign a default value"
+    echo
+    list_profiles
+    exit 1
+  fi
+  
+  if ! grep -q "\[${KAWS_AWS_PROFILE}\]" ~/.aws/config; then
+    error "AWS profile ${C_YELLOW}${KAWS_AWS_PROFILE}${C_STD} not found"
+    echo
+    list_profiles
+    exit 1
+  fi
+
+  debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}KAWS_AWS_PROFILE${C_STD} = ${KAWS_AWS_PROFILE}"
+}
+
+list_regions() {
+  echo "Regions:"
+  aws --profile ${KAWS_AWS_PROFILE} ec2 describe-regions | jq -r '.Regions[] | .RegionName' | while read reg
+  do
+    if [[ "${DEFAULT_AWS_REGION}" == "${reg}" ]]; then
+      echo -e "${C_GREEN}${I_BULLET}${C_STD}  ${C_YELLOW}${reg}${C_STD} ${C_GREEN}${I_CHECK}${C_STD}"
+    else
+      echo -e "${C_GREEN}${I_BULLET}${C_STD}  ${reg}"
+    fi
+  done
+}
+
+check_region() {
+  DEFAULT_AWS_REGION=$(aws configure get region --profile ${KAWS_AWS_PROFILE})
+  
+  if [[ -z ${KAWS_AWS_REGION} ]]; then
+    KAWS_AWS_REGION=${DEFAULT_AWS_REGION}
+    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}KAWS_AWS_REGION${C_STD} = ${KAWS_AWS_REGION} (default one)"
+    return
+  fi
+
+
+  reg=$(aws --profile ${KAWS_AWS_PROFILE} ec2 describe-regions --region-names ${KAWS_AWS_REGION} 2>/dev/null | jq -r '.Regions[] | .RegionName')
+  if [[ "${KAWS_AWS_REGION}" == "${reg}" ]]; then
+    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}KAWS_AWS_REGION${C_STD} = ${KAWS_AWS_REGION}"
+  else
+    error "${C_YELLOW}${KAWS_AWS_REGION}${C_STD} is not a valid region"
+    [[ -n ${DEFAULT_AWS_REGION} ]] && echo -e "Try with ${C_WHITEBOLD}KAWS_AWS_REGION=${C_YELLOW}${DEFAULT_AWS_REGION}${C_STD} or one of the following"
+    echo 
+    list_regions
+    exit 1
+  fi
+}
+
+list_keypairs() {
+  echo "Key Pairs:"
+  aws --profile ${KAWS_AWS_PROFILE} ec2 describe-key-pairs | jq -r '.KeyPairs[] | .KeyName' | while read kp
+  do
+    echo -e "${C_GREEN}${I_BULLET}${C_STD}  ${kp}"
+  done
+}
+
+check_keypair() {
+  if [[ -z ${KAWS_KEY_NAME} ]]; then
+    error "key name cannot be empty"
+    echo -e "Assign to ${C_WHITEBOLD}KAWS_KEY_NAME${C_STD} one of the following keys name"
+    echo
+    list_keypairs
+    exit 1
+  fi
+
+  keynames=$(aws --profile ${KAWS_AWS_PROFILE} ec2 describe-key-pairs 2>/dev/null | jq -r '.KeyPairs[] | .KeyName')
+  if [[ -z $keynames ]]; then 
+    error "not found any key pair"
+    echo -e "Create a key pair and assign it to ${C_WHITEBOLD}KAWS_KEY_NAME${C_STD}"
+    exit 1
+  fi
+
+  kp=$(aws --profile ${KAWS_AWS_PROFILE} ec2 describe-key-pairs --key-names ${KAWS_KEY_NAME} 2>/dev/null | jq -r '.KeyPairs[] | .KeyName')
+  if [[ "${kp}" == "${KAWS_KEY_NAME}" ]]; then
+    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}KAWS_KEY_NAME${C_STD} is a valid key name (${KAWS_KEY_NAME})"
+  else
+    error "key name ${C_YELLOW}${KAWS_KEY_NAME}${C_STD} not found"
+    echo -e "Assign to ${C_WHITEBOLD}KAWS_KEY_NAME${C_STD} one of the following keys name"
+    echo
+    list_keypairs
+    exit 1
+  fi
+}
+
+list_domains() {
+  echo "Domains:"
+  aws --profile ${KAWS_AWS_PROFILE} route53 list-hosted-zones | jq -r '.HostedZones[].Name' | while read dn
+  do
+    echo -e "${C_GREEN}${I_BULLET}${C_STD}  ${dn%.}"
+  done
+}
+
+check_domain() {
+  if [[ -z ${KAWS_DOMAIN_NAME} ]]; then
+    error "domain name cannot be empty"
+    echo -e "Assign to ${C_WHITEBOLD}KAWS_DOMAIN_NAME${C_STD} one of the following keys name"
+    echo
+    list_domains
+    exit 1
+  fi
+
+  domains=$(aws --profile ${KAWS_AWS_PROFILE} route53 list-hosted-zones 2>/dev/null | jq -r '.HostedZones[].Name')
+  if [[ -z $domains ]]; then 
+    error "not found any domain"
+    echo -e "Create a Route 53 domain and assign it to ${C_WHITEBOLD}KAWS_DOMAIN_NAME${C_STD}"
+    exit 1
+  fi
+
+  dn=$(aws --profile ${KAWS_AWS_PROFILE} route53 list-hosted-zones-by-name --dns-name ${KAWS_DOMAIN_NAME} 2>/dev/null | jq -r '.HostedZones[].Name')
+  if [[ "${dn}" == "${KAWS_DOMAIN_NAME}." ]]; then
+    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}KAWS_DOMAIN_NAME${C_STD} is a valid domain name in Route 53 (${KAWS_DOMAIN_NAME})"
+  else
+    error "domain name ${C_YELLOW}${KAWS_DOMAIN_NAME}${C_STD} not found"
+    echo -e "Assign to ${C_WHITEBOLD}KAWS_DOMAIN_NAME${C_STD} one of the following domain names"
+    echo
+    list_domains
+    exit 1
+  fi
+}
+
+list_buckets() {
+  echo "S3 Buckets:"
+  aws --profile $aws_profile s3 ls | cut -d " " -f3 | while read s3b
+  do
+    echo -e "${C_GREEN}${I_BULLET}${C_STD}  ${s3b}"
+  done
+}
+
+check_bucket() {
+  if [[ -z ${KAWS_BUCKET} ]]; then
+    error "s3 bucket name cannot be empty"
+    echo -e "Assign to ${C_WHITEBOLD}KAWS_BUCKET${C_STD} one of the following buckets"
+    echo
+    list_buckets
+    exit 1
+  fi
+
+  buckets=$(aws --profile default s3 ls 2>/dev/null)
+  if [[ -z $buckets ]]; then 
+    error "not found any S3 bucket"
+    echo -e "Create an S3 bucket and assign it to ${C_WHITEBOLD}KAWS_BUCKET${C_STD}"
+    exit 1
+  fi
+
+  aws --profile default s3 ls johandry-kube 2>/dev/null
+  if [[ $? -eq 0 ]]; then
+    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}KAWS_BUCKET${C_STD} is a valid S3 bucket (${KAWS_BUCKET})"
+  else
+    error "s3 bucket ${C_YELLOW}${KAWS_BUCKET}${C_STD} not found"
+    echo -e "Assign to ${C_WHITEBOLD}KAWS_BUCKET${C_STD} one of the following s3 buckets"
+    echo
+    list_buckets
+    exit 1
+  fi
+}
+
+setup() {
+  aws_profile=${KAWS_AWS_PROFILE}
+  aws_region=${KAWS_AWS_REGION}
+  key_name=${KAWS_KEY_NAME}
+  domain_name=${KAWS_DOMAIN_NAME}
+  bucket=${KAWS_BUCKET}
+
+  if [[ -z ${KAWS_STACK_NAME} ]]; then
+    error "stack name cannot be empty"
+    echo -e "Use flag ${C_YELLOW}--stack${C_STD} to set the stack name"
+    usage 
+    exit 1
+  else
+    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}KAWS_STACK_NAME${C_STD} = ${KAWS_STACK_NAME}" 
+  fi
+  stack_name=${KAWS_STACK_NAME}
+
+  cd $SCRIPT_DIR
+  mkdir -p vpc kube-aws 
+  # mkdir -p iam addons
+
+  cp src/kube-aws/cluster.yaml kube-aws/
+  cp src/vpc/vpc.yaml vpc/
+  # cp src/iam/* iam/
+  # cp -r src/addons/* addons
+
+  ami_id=$(curl -s https://coreos.com/dist/aws/aws-stable.json | jq '.["'$aws_region'"].hvm')
+  ami_version=$(curl -s https://coreos.com/dist/aws/aws-stable.json | jq '.release_info.version')
+  debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}CoreOS AMI id${C_STD} ${ami_id} ${C_YELLOW}version${C_STD} ${ami_version}"
+
+  my_ip=$(dig +short myip.opendns.com @resolver1.opendns.com)
+  debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}my external IP${C_STD} = ${my_ip}"
+
+  #aws hosted zone id
+  hosted_zone_id=$(aws --profile ${aws_profile} route53 list-hosted-zones | jq -r '.HostedZones[] | select(.Name="'${domain_name}'") | .Id' | cut -d "/" -f3)
+  debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}hosted zone id${C_STD} = ${hosted_zone_id}"
+}
+
+clean() {
+  cd $SCRIPT_DIR
+  rm -rf vpc kube-aws 
+  # rm -rf iam addons
+}
+
+vpn_info() {
+  echo -e "Go to ${C_RED}https://k8svpn.${domain_name}${C_STD} and configure the VPN server using user: ${C_RED}pritunl${C_STD} and password: ${C_RED}pritunl${C_STD}"
+  echo -e "If you don't want to configure the Security Group manually, configure the server to use the port ${C_RED}12777${C_STD}"
+}
+
+init() {
+  debug "Setting aws region"
+  sed -i -e 's,aws_region,'"$aws_region"',g' kube-aws/cluster.yaml
+  sed -i -e 's,aws_region,'"$aws_region"',g' vpc/vpc.yaml
+  # sed -i -e 's,aws_region,'"$aws_region"',g' iam/iam.yaml
+  # sed -i -e 's,aws_region,'"$aws_region"',g' iam/deploy
+  # sed -i -e 's,aws_region,'"$aws_region"',g' addons/fluentd/fluentd-kubernetes-cloudwatch/fluentd.ds.yaml
+
+  debug "Setting key pair"
+  sed -i -e 's,key_name,'"$key_name"',g' kube-aws/cluster.yaml
+  sed -i -e 's,key_name,'"$key_name"',g' vpc/vpc.yaml
+
+  debug "Setting hosted_zone_id"
+  sed -i -e 's,hosted_zone_id,'"$hosted_zone_id"',g' kube-aws/cluster.yaml
+  # sed -i -e 's,hosted_zone_id,'"$hosted_zone_id"',g' iam/iam.yaml
+
+  debug "Setting domain_name"
+  sed -i -e 's,domain_name,'"$domain_name"',g' kube-aws/cluster.yaml
+  # sed -i -e 's,domain_name,'"$domain_name"',g' addons/external-dns/external-dns.yaml
+  sed -i -e 's,domain_name,'"$domain_name"',g' vpc/vpc.yaml
+
+  debug "Setting ami_id"
+  sed -i -e 's,ami_id,'"$ami_id"',g' vpc/vpc.yaml
+
+  debug "Setting allowed IP for VPN access SSH and Web ports"
+  sed -i -e 's,my_ip,'"$my_ip"',g' vpc/vpc.yaml
+
+  find . -name "*-e" -exec rm -rf {} \;
+    
+  if [[ "$(aws --profile $aws_profile cloudformation describe-stacks --stack-name=$stack_name | jq -r '.Stacks[].StackStatus')" != "CREATE_COMPLETE" ]] > /dev/null 2>&1; then
+    debug "Setting default CIDR values in vpc.yaml"
+    sed -i -e 's,VPC_CIDR,'"$DEFAULT_VPC_CIDR"',g' ./vpc/vpc.yaml
+    sed -i -e 's,PRIVATE_SUBNET_A_CIDR,'"$DEFAULT_PRIVATE_SUBNET_A_CIDR"',g' ./vpc/vpc.yaml
+    sed -i -e 's,PRIVATE_SUBNET_B_CIDR,'"$DEFAULT_PRIVATE_SUBNET_B_CIDR"',g' ./vpc/vpc.yaml
+    sed -i -e 's,PRIVATE_SUBNET_C_CIDR,'"$DEFAULT_PRIVATE_SUBNET_C_CIDR"',g' ./vpc/vpc.yaml
+    sed -i -e 's,PUBLIC_SUBNET_A_CIDR,'"$DEFAULT_PUBLIC_SUBNET_A_CIDR"',g' ./vpc/vpc.yaml
+    sed -i -e 's,PUBLIC_SUBNET_B_CIDR,'"$DEFAULT_PUBLIC_SUBNET_B_CIDR"',g' ./vpc/vpc.yaml
+    sed -i -e 's,PUBLIC_SUBNET_C_CIDR,'"$DEFAULT_PUBLIC_SUBNET_C_CIDR"',g' ./vpc/vpc.yaml
+    #clean sed generated files
+    find . -name "*-e" -exec rm -rf {} \;
+  fi
+}
+
+deploy_vpc() {
+  echo -e "${C_BLUE}Creating CloudFormation VPC stack${C_STD}"
+
+  ROLE="kube-aws-vpc"
+  STACK_FILE="vpc"
+  SERVICE_NAME_PREFIX="k8s"
+  KUBERNETES_CLUSTER="demokube" #if you change this value, please also change the clusterName value in cluster.yaml
+  STACK_PARAMS="ParameterKey=ServiceNamePrefix,ParameterValue=${SERVICE_NAME_PREFIX} ParameterKey=Role,ParameterValue=${ROLE} ParameterKey=KubernetesCluster,ParameterValue=${KUBERNETES_CLUSTER}"
+  STACK_TAGS="Key=Role,Value=${ROLE}"
+
+  debug "Validating template ${C_YELLOW}vpc/vpc.yaml${C_STD}"
+  aws cloudformation validate-template --template-body file://./vpc/vpc.yaml
+
+  debug "Creating stack ${C_YELLOW}${stack_name}${C_STD}"
+  aws --region ${aws_region} cloudformation create-stack \
+      --stack-name ${stack_name} \
+      --template-body file://./vpc/vpc.yaml \
+      --parameters ${STACK_PARAMS} \
+      --capabilities CAPABILITY_IAM \
+      --tags ${STACK_TAGS}
+}
+
+create() {
+  if [[ "$(aws --profile $aws_profile cloudformation describe-stacks --stack-name=$stack_name | jq -r '.Stacks[].StackStatus')" != "CREATE_COMPLETE" ]] > /dev/null 2>&1; then
+    deploy_vpc
+
+    echo -e "${C_BLUE}Wait until the CloudFormation stack is created${C_STD}"
+    echo 
+    while [[ "$(aws --profile $aws_profile cloudformation describe-stacks --stack-name=$stack_name | jq -r '.Stacks[].StackStatus')" != "CREATE_COMPLETE" ]]
+      do sleep 2; printf ".";
+    done
+    echo ; echo
+
+    echo -e "${C_BLUE}CloudFormation VPC stack successfully created${C_STD}"
+  else
+    echo -e "${C_BLUE}Stack ${stack_name} already created${C_STD}"
+  fi
+
+  echo -e "${C_BLUE}Stack ${stack_name} output:${C_STD}"
+
+  VPN_DNS_RECCORD=$(aws --profile $aws_profile cloudformation describe-stacks --stack-name=$stack_name | jq -r '.Stacks[].Outputs[] | select(.OutputKey=="VpnDNSReccord") | .OutputValue')
+  echo -e "${C_RED}VPN_DNS_RECCORD:   ${C_GREEN}${VPN_DNS_RECCORD}${C_STD}"
+
+  VPN_IP_ADDRESS=$(aws --profile $aws_profile cloudformation describe-stacks --stack-name=$stack_name | jq -r '.Stacks[].Outputs[] | select(.OutputKey=="VpnIpAddress") | .OutputValue')
+  echo -e "${C_RED}VPN_IP_ADDRESS:   ${C_GREEN}${VPN_IP_ADDRESS}${C_STD}"
+
+  KMS_KEY_ARN=$(aws --profile $aws_profile cloudformation describe-stacks --stack-name=$stack_name | jq -r '.Stacks[].Outputs[] | select(.OutputKey=="KMSKeyArn") | .OutputValue')
+  echo -e "${C_RED}KMS_KEY_ARN:      ${C_GREEN}${KMS_KEY_ARN}${C_STD}"
+
+  VPC_ID=$(aws --profile $aws_profile cloudformation describe-stacks --stack-name=$stack_name | jq -r '.Stacks[].Outputs[] | select(.OutputKey=="VpcId") | .OutputValue')
+  echo -e "${C_RED}VPC_ID:           ${C_GREEN}${VPC_ID}${C_STD}"
+
+  VPC_CIDR=$(aws --profile $aws_profile cloudformation describe-stacks --stack-name=$stack_name | jq -r '.Stacks[].Outputs[] | select(.OutputKey=="CidrBlock") | .OutputValue')
+  echo -e "${C_RED}VPC_CIDR:         ${C_GREEN}${VPC_CIDR}${C_STD}"
+
+  ROUTE_TABLE_ID=$(aws --profile $aws_profile cloudformation describe-stacks --stack-name=$stack_name | jq -r '.Stacks[].Outputs[] | select(.OutputKey=="PrivateRouteTableId") | .OutputValue')
+  echo -e "${C_RED}ROUTE_TABLE_ID:   ${C_GREEN}${ROUTE_TABLE_ID}${C_STD}"
+
+  PRIVATE_SUBNET_A=$(aws --profile $aws_profile cloudformation describe-stacks --stack-name=$stack_name | jq -r '.Stacks[].Outputs[] | select(.OutputKey=="PrivateSubnetAId") | .OutputValue')
+  echo -e "${C_RED}PRIVATE_SUBNET_A: ${C_GREEN}${PRIVATE_SUBNET_A}${C_STD}"
+
+  PRIVATE_SUBNET_B=$(aws --profile $aws_profile cloudformation describe-stacks --stack-name=$stack_name | jq -r '.Stacks[].Outputs[] | select(.OutputKey=="PrivateSubnetBId") | .OutputValue')
+  echo -e "${C_RED}PRIVATE_SUBNET_B: ${C_GREEN}${PRIVATE_SUBNET_B}${C_STD}"
+
+  PRIVATE_SUBNET_C=$(aws --profile $aws_profile cloudformation describe-stacks --stack-name=$stack_name | jq -r '.Stacks[].Outputs[] | select(.OutputKey=="PrivateSubnetCId") | .OutputValue')
+  echo -e "${C_RED}PRIVATE_SUBNET_C: ${C_GREEN}${PRIVATE_SUBNET_C}${C_STD}"
+
+  AWS_ACCOUNT_ID=$(aws --profile $aws_profile cloudformation describe-stacks --stack-name=$stack_name | jq -r '.Stacks[].Outputs[] | select(.OutputKey=="KMSKeyArn") | .OutputValue' | cut -d ':' -f5 )
+  echo -e "${C_RED}AWS_ACCOUNT_ID:   ${C_GREEN}${AWS_ACCOUNT_ID}${C_STD}"
+}
+
+init_install() {
+  debug "Replacing the values from the CloudFormation VPC outputs"
+  sed -i -e 's,kms_key_arn,'"$KMS_KEY_ARN"',g' kube-aws/cluster.yaml
+  sed -i -e 's,vpc_id,'"$VPC_ID"',g' kube-aws/cluster.yaml
+  sed -i -e 's,vpc_cidr,'"$VPC_CIDR"',g' kube-aws/cluster.yaml
+  sed -i -e 's,route_table_id,'"$ROUTE_TABLE_ID"',g' kube-aws/cluster.yaml
+  sed -i -e 's,private_subnet_a,'"$PRIVATE_SUBNET_A"',g' kube-aws/cluster.yaml
+  sed -i -e 's,private_subnet_b,'"$PRIVATE_SUBNET_B"',g' kube-aws/cluster.yaml
+  sed -i -e 's,private_subnet_c,'"$PRIVATE_SUBNET_C"',g' kube-aws/cluster.yaml
+  # sed -i -e 's,aws_account_id,'"$AWS_ACCOUNT_ID"',g' iam/iam.yaml
+  find . -name "*-e" -exec rm -rf {} \;
+}
+
+install() {
+  cd kube-aws
+
+  echo -e "${C_BLUE}Generate credentials${C_STD}"
+  kube-aws render credentials --generate-ca
+  echo
+
+  echo -e "${C_BLUE}Render stack${C_STD}"
+  kube-aws render stack
+  echo
+
+  echo -e "${C_BLUE}Validate stack${C_STD}"
+  AWS_PROFILE=$aws_profile kube-aws validate --s3-uri s3://$bucket
+  echo
+
+  echo -e "${C_BLUE}Export stack${C_STD}"
+  AWS_PROFILE=$aws_profile kube-aws up --s3-uri s3://$bucket --export
+  echo
+
+  echo -e "${C_BLUE}Deploy stack${C_STD}"
+  AWS_PROFILE=$aws_profile kube-aws up --s3-uri s3://$bucket
+  echo
+}
+
+destroy() {
+  echo -e "${C_YELLOW}This feature is not done yet${C_STD}"
+  echo -e "Login to the AWS Console, go to CloudFormation, select the stack ${C_YELLOW}${KAWS_STACK_NAME}${C_STD}, expand the Action button and select ${C_RED}Delete Stack${C_STD}"
+}
+
+# Usage function
+# ------------------------------------------------------------------------------
+usage() {
+  echo -e "${C_GREEN}KAWS${C_STD} is a script for setting up a Kubernetes cluster on AWS"
+  echo
+  echo "Usage:"
+  echo "  ${SCRIPT_NAME} [ command ] [ flags ]"
+  echo
+  echo "Commands:"
+  echo "  help                      Print this help message"
+  echo "  init                      Initialize all the required files"
+  echo "  create                    Create the clusters to install Kubernetes. Includes the init phase"
+  echo "  init-install              Initialize all the required files to install Kubernetes. Includes the init and create phase"
+  echo "  install                   Install Kubernetes. Includes the init, create and init-install phase"
+  echo "  clean                     Delete all created files"
+  echo "  destroy                   Destroy the Kubernetes cluster"
+  echo
+  echo "Flags:"
+  echo "  -h | --help               Print this help message"
+  echo "  --debug                   Enable debug mode"
+  echo "  --profile <aws profile>   AWS profile to use. Default ${DEFAULT_AWS_PROFILE}"
+  echo "  --stack <stack name>      Stack name. Default ${DEFAULT_STACK_NAME}"
+  echo 
+  echo -e "${C_YELLOW}Required Flags${C_STD}"
+  echo "  --key-pair <key pair>     AWS Key Pair"
+  echo "  --domain <domain name>    Domain name in Route 53"
+  echo "  --s3 <s3 bucket name>     AWS S3 bucket name"
+}
+
+# Main code
+# ------------------------------------------------------------------------------
+[[ $# -eq 0 ]] && usage && exit 0
+
+action=
+while (( "$#" )); do
+  case $1 in
+    -h | --help | help ) usage ; exit 0
+    ;;
+    --debug ) DEBUG=1
+    ;;
+    --profile ) KAWS_AWS_PROFILE=$2 ; shift
+    ;;
+    --stack ) KAWS_STACK_NAME=$2 ; shift
+    ;;
+    --key-pair ) KAWS_KEY_NAME=$2 ; shift
+    ;;
+    --domain ) KAWS_DOMAIN_NAME=$2 ; shift
+    ;;
+    --s3 ) KAWS_BUCKET=$2 ; shift
+    ;;
+    init ) action=init
+    ;;
+    create ) action=create
+    ;;
+    install ) action=install
+    ;;
+    init-install ) action=init-install
+    ;;
+    destroy ) destroy ; exit 0
+    ;;
+    clean ) clean ; exit 0
+    ;;
+    * )
+      error "unknown command or flag ${C_YELLOW}$1${C_STD}"
+      usage
+      exit 1
+    ;;
+  esac
+  shift
+done
+
+check_requirements
+check_profile
+check_region
+check_keypair
+check_domain
+check_bucket
+setup
+
+[[ -z ${action} ]] && usage && exit 0
+case ${action} in
+  init ) 
+    init
+  ;;
+  create ) 
+    init
+    create
+  ;;
+  init-install )
+    init
+    create
+    init_install
+  ;;
+  install ) 
+    init
+    create
+    init_install
+    install
+  ;;
+  destroy )
+    destroy
+  ;;
+  * ) 
+    error "unknown action ${C_YELLOW}${action}${C_STD}"
+    usage
+    exit 1
+  ;;
+esac
+
+echo -e "${C_GREEN}${I_CHECK}  Done${C_STD}"
