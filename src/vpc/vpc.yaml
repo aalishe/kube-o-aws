@@ -1,5 +1,5 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: kube-aws-secure VPC (Public and Private Subnets, IGW, Route Tables, KMS)
+AWSTemplateFormatVersion: 2010-09-09
+Description: KAWS VPC (Public and Private Subnets, IGW, Route Tables, KMS)
 
 Parameters:
   Role:
@@ -118,12 +118,6 @@ Resources:
     Properties:
       AllocationId: !GetAtt NATGatewayEIP.AllocationId
       SubnetId:     !Ref PublicSubnetA
-
-  PublicVPCGatewayAttachment:
-    Type: AWS::EC2::VPCGatewayAttachment
-    Properties:
-      VpcId:             !Ref KubeAwsVPC
-      InternetGatewayId: !Ref PublicInternetGateway
 
   ### Public Subnets
   PublicSubnetA:
