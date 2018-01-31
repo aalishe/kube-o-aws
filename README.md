@@ -16,19 +16,19 @@ These 3 parameters can be also provided to the script in environment variables o
 
 For example, create the file `kaws.conf` with the following content:
 
-  KAWS_KEY_NAME=kube-keypair
-  KAWS_DOMAIN_NAME=mycompany.com
-  KAWS_BUCKET=mycompany-kube-bucket
+    KAWS_KEY_NAME=kube-keypair
+    KAWS_DOMAIN_NAME=mycompany.com
+    KAWS_BUCKET=mycompany-kube-bucket
 
 Now execute `kaws install` with the name of the stack for the VPC:
 
-  ./kaws install --stack somename
+    ./kaws install --stack somename
 
 This will create a `./vpc/vpc.yaml` file with the CloudFormation Template for the VPC and will create it. Then will use `kube-aws` to generate all the required certificates, create all the CloudFormation Templates to create the Kubernetes cluster, and create the cluster with Kubernetes running.
 
 When done or if something fails, destroy the cluster and stacks with:
 
-  ./kaws destroy --stack somename
+    ./kaws destroy --stack somename
 
 Or, start over running the `clean` subcommand: `./kaws clean`
 
