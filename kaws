@@ -56,7 +56,7 @@ I_CHECK="\xe2\x9c\x94"
 I_BULLET="\xe2\x80\xa2"
 
 # Enable debug with '--debug' parameter or with env variables / config file
-: ${DEBUG:=0}
+: ${KAWS_DEBUG:=0}
 # Enable deeper debug with '--debug2' parameter
 DEEP_DEBUG=0
 
@@ -72,7 +72,7 @@ ok() {
 }
 
 debug() {
-  (( ${DEBUG} )) && echo -e "${C_PURPLE}[DEBUG]${C_STD}  ${1}"
+  (( ${KAWS_DEBUG} )) && echo -e "${C_PURPLE}[DEBUG]${C_STD}  ${1}"
 }
 
 # Validation functions
@@ -146,7 +146,7 @@ check_profile() {
     exit 1
   fi
   
-  if ! grep -q "\[${AWS_PROFILE}\]" ~/.aws/config; then
+  if ! grep -q "\[\(profile \)*${AWS_PROFILE}\]" ~/.aws/config; then
     error "AWS profile ${C_YELLOW}${AWS_PROFILE}${C_STD} not found"
     echo
     list_profiles
@@ -446,15 +446,15 @@ customize() {
 subnets:
 - name: PublicSubnetA
   # private: true
-  availabilityZone: ${DEFAULT_REGION}a
+  availabilityZone: ${aws_region}a
   instanceCIDR: "${DEFAULT_PUBLIC_SUBNET_A_CIDR}"
 - name: PublicSubnetB
   # private: true
-  availabilityZone: ${DEFAULT_REGION}b
+  availabilityZone: ${aws_region}b
   instanceCIDR: "${DEFAULT_PUBLIC_SUBNET_B_CIDR}"
 - name: PublicSubnetC
   # private: true
-  availabilityZone: ${DEFAULT_REGION}c
+  availabilityZone: ${aws_region}c
   instanceCIDR: "${DEFAULT_PUBLIC_SUBNET_C_CIDR}"
 EOSNET
   fi
@@ -928,7 +928,7 @@ while (( "$#" )); do
   case $1 in
     -h | --help | help ) usage ; exit 0
     ;;
-    --debug ) DEBUG=1
+    --debug ) KAWS_DEBUG=1
     ;;
     --debug2 ) DEEP_DEBUG=1
     ;;
