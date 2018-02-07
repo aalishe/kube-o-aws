@@ -1,9 +1,10 @@
-kaws.conf
+# Every config files
+*.conf
+*.conf.*
+
+# Every temporal directory or file
 tmp/
+cluster.*.yaml
 
-/kube-aws
-/vpc
-
-src/addons
-src/iam
-src/vpn
+# Output directories with cluster config
+kube-aws/
