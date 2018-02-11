@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 
 # Input Variables:
-# Environment variable | Command flag | Required |   Default 
-# ------------------------------------------------------------
+# Environment variable | Command flag | Required |    Default   
+# ---------------------------------------------------------------
 # KAWS_KEY_NAME        | --key-pair   |   YES    | 
 # KAWS_DOMAIN_NAME     | --domain     |   YES    | 
 # CONFIG_FILE          | --conf       |    NO    | ./kaws.conf
+# CONFIG_DIR           | --conf-dir   |    NO    | ./kube-aws-kaws-kube
 # KAWS_CLUSTER_NAME    | --cluster    |    NO    | kaws-kube
 # KAWS_BUCKET          | --bucket     |    NO    | kaws-kube
 # AWS_PROFILE          | --profile    |    NO    | default
 # AWS_REGION           |              |    NO    | us-west-2
 # KAWS_KMS             |              |    NO    |
-# ------------------------------------------------------------
+# KAWS_PUBLIC_SUBNET_A_CIDR           |    NO    | 10.0.101.0/24
+# KAWS_PUBLIC_SUBNET_B_CIDR           |    NO    | 10.0.102.0/24
+# KAWS_PUBLIC_SUBNET_C_CIDR           |    NO    | 10.0.103.0/24
+# ---------------------------------------------------------------
 
 SCRIPT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 SCRIPT_NAME="$( basename "$0" )"
@@ -38,6 +42,14 @@ DEFAULT_PUBLIC_SUBNET_C_CIDR=10.0.103.0/24
 : ${KAWS_ENVIRONMENT:=$DEFAULT_ENVIRONMENT}
 : ${AWS_PROFILE:=$DEFAULT_AWS_PROFILE}
 : ${AWS_REGION:=$DEFAULT_REGION}
+
+: ${KAWS_PUBLIC_SUBNET_A_CIDR:=$DEFAULT_PUBLIC_SUBNET_A_CIDR}
+: ${KAWS_PUBLIC_SUBNET_B_CIDR:=$DEFAULT_PUBLIC_SUBNET_B_CIDR}
+: ${KAWS_PUBLIC_SUBNET_C_CIDR:=$DEFAULT_PUBLIC_SUBNET_C_CIDR}
+
+DEFAULT_CONFIG_DIR_NAME="kube-aws-${KAWS_CLUSTER_NAME}"
+DEFAULT_CONFIG_DIR="${PWD}/${DEFAULT_CONFIG_DIR_NAME}"
+: ${CONFIG_DIR:=$DEFAULT_CONFIG_DIR}
 
 # Get settings from configuration file
 [[ -f ${CONFIG_FILE} ]] && source ${CONFIG_FILE}
@@ -388,15 +400,41 @@ setup() {
   check_kms
   kms_key_arn=${KAWS_KMS}
 
-  mkdir -p kube-aws
+  mkdir -p ${CONFIG_DIR}
 }
 
 clean() {
-  rm -rf ./kube-aws
+  rm -rf ./${CONFIG_DIR}
+}
+
+clean_kms() {
+  if [[ -z $KAWS_KMS ]]; then
+    error "unknown KMS Key or not defined. Use the ${C_YELLOW}KAWS_KMS${C_STD} environment variable or config setting"
+    exit 1
+  else
+    echo -e "${C_YELLOW}Destroying the KMS key ${C_RED}${KAWS_KMS}${C_STD}"
+    aws --profile ${AWS_PROFILE} kms schedule-key-deletion --key-id ${KAWS_KMS}
+    sed -i -e '/^KAWS_KMS=.*/d' ${CONFIG_FILE}
+    rm -f ${CONFIG_FILE}-e
+    echo
+  fi
+}
+
+clean_s3() {
+  if [[ -z $KAWS_BUCKET ]]; then
+    error "unknown S3 Bucket name or not defined. Use the ${C_YELLOW}KAWS_BUCKET${C_STD} environment variable or config setting"
+    exit 1
+  else
+    echo -e "${C_YELLOW}Destroying the S3 Bucket ${C_RED}${KAWS_BUCKET}${C_STD}"
+    aws --profile ${AWS_PROFILE} s3 rb s3://${KAWS_BUCKET} --force 
+    sed -i -e '/^KAWS_BUCKET=.*/d' ${CONFIG_FILE}
+    rm -f ${CONFIG_FILE}-e
+    echo
+  fi
 }
 
 init() {
-  cd ./kube-aws
+  cd ${CONFIG_DIR}
 
   echo -e "${C_BLUE}Create the configuration file 'cluster.yaml'${C_STD}"
   AWS_PROFILE=${aws_profile} kube-aws init \
@@ -413,7 +451,7 @@ init() {
 }
 
 render() {
-  cd ./kube-aws
+  cd ${CONFIG_DIR}
   
   echo -e "${C_BLUE}Create new credentials for the cluster${C_STD}"
   AWS_PROFILE=${aws_profile}  kube-aws render credentials --generate-ca
@@ -427,7 +465,7 @@ render() {
 }
 
 customize() {
-  cd ./kube-aws
+  cd ${CONFIG_DIR}
 
   debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Calico:${C_STD} enabled"
   sed -i -e 's/# useCalico: false/useCalico: true/' cluster.yaml
@@ -447,15 +485,15 @@ subnets:
 - name: PublicSubnetA
   # private: true
   availabilityZone: ${aws_region}a
-  instanceCIDR: "${DEFAULT_PUBLIC_SUBNET_A_CIDR}"
+  instanceCIDR: "${KAWS_PUBLIC_SUBNET_A_CIDR}"
 - name: PublicSubnetB
   # private: true
   availabilityZone: ${aws_region}b
-  instanceCIDR: "${DEFAULT_PUBLIC_SUBNET_B_CIDR}"
+  instanceCIDR: "${KAWS_PUBLIC_SUBNET_B_CIDR}"
 - name: PublicSubnetC
   # private: true
   availabilityZone: ${aws_region}c
-  instanceCIDR: "${DEFAULT_PUBLIC_SUBNET_C_CIDR}"
+  instanceCIDR: "${KAWS_PUBLIC_SUBNET_C_CIDR}"
 EOSNET
   fi
 
@@ -531,31 +569,31 @@ EOSNET
 #     kube-aws.coreos.com/role: controller
 # EOCTRLR
 
-#     cat <<EOCTRLR >> cluster.yaml
-# # KAWS: Controller config with subnets for the Kubernetes cluster
-# controller:
-#   createTimeout: PT60M
-#   instanceType: t2.medium
-#   instanceTags:
-#     Role: controller
-#     SubRole: Development
-#     Application: Kubernetes
-#   rootVolume:
-#     size: 30
-#     type: gp2
-#   autoScalingGroup:
-#     minSize: 1
-#     maxSize: 2
-#     rollingUpdateMinInstancesInService: 1
-#   iam:
-#     role:
-#   subnets:
-#   - name: PublicSubnetA
-#   - name: PublicSubnetB
-#   - name: PublicSubnetC
-#   nodeLabels:
-#     kube-aws.coreos.com/role: controller
-# EOCTRLR
+    cat <<EOCTRLR >> cluster.yaml
+# KAWS: Controller config with subnets for the Kubernetes cluster
+controller:
+  createTimeout: PT60M
+  instanceType: t2.medium
+  instanceTags:
+    Role: controller
+    SubRole: Development
+    Application: Kubernetes
+  rootVolume:
+    size: 30
+    type: gp2
+  autoScalingGroup:
+    minSize: 1
+    maxSize: 2
+    rollingUpdateMinInstancesInService: 1
+  iam:
+    role:
+  subnets:
+  - name: PublicSubnetA
+  - name: PublicSubnetB
+  - name: PublicSubnetC
+  nodeLabels:
+    kube-aws.coreos.com/role: controller
+EOCTRLR
 
   # fi
 
@@ -582,8 +620,8 @@ worker:
         type: gp2
       createTimeout: PT60M
       autoScalingGroup:
-        minSize: 2
-        maxSize: 4
+        minSize: 1
+        maxSize: 3
         rollingUpdateMinInstancesInService: 2
       autoscaling:
         clusterAutoscaler:
@@ -604,8 +642,8 @@ worker:
         type: gp2
       createTimeout: PT60M
       autoScalingGroup:
-        minSize: 2
-        maxSize: 4
+        minSize: 1
+        maxSize: 3
         rollingUpdateMinInstancesInService: 2
       autoscaling:
         clusterAutoscaler:
@@ -626,8 +664,8 @@ worker:
         type: gp2
       createTimeout: PT60M
       autoScalingGroup:
-        minSize: 2
-        maxSize: 4
+        minSize: 1
+        maxSize: 3
         rollingUpdateMinInstancesInService: 2
       autoscaling:
         clusterAutoscaler:
@@ -663,8 +701,8 @@ EOWRKR
 #         enabled: true
 #         maxBatchSize: 1
 #       autoScalingGroup:
-#         minSize: 2
-#         maxSize: 4
+#         minSize: 1
+#         maxSize: 3
 #         rollingUpdateMinInstancesInService: 2
 #       autoscaling:
 #         clusterAutoscaler:
@@ -716,7 +754,7 @@ EOST
 }
 
 validate_render() {
-  cd ./kube-aws
+  cd ${CONFIG_DIR}
 
   echo -e "${C_BLUE}Validating all rendered files${C_STD}"
   AWS_PROFILE=${aws_profile} kube-aws validate --s3-uri=s3://${bucket_name}
@@ -737,7 +775,7 @@ initialize() {
 }
 
 launch() {
-  cd ./kube-aws
+  cd ${CONFIG_DIR}
 
   echo -e "${C_BLUE}Launching the new cluster${C_STD}"
   AWS_PROFILE=${aws_profile}  kube-aws up --s3-uri=s3://${bucket_name}
@@ -747,7 +785,7 @@ launch() {
 }
 
 update() {
-  cd ./kube-aws
+  cd ${CONFIG_DIR}
 
   echo -e "${C_BLUE}Destroying the cluster${C_STD}"
   AWS_PROFILE=${aws_profile} kube-aws update --s3-uri=s3://${bucket_name}
@@ -757,28 +795,19 @@ update() {
 }
 
 destroy() {
-  cd ./kube-aws
+  cd ${CONFIG_DIR}
 
-  echo -e "${C_YELLOW}Destroying the cluster${C_STD}"
+  name=$(grep 'clusterName:' cluster.yaml)
+  region=$(grep 'region:' cluster.yaml)
+  echo -e "${C_GREEN}Destroying the cluster ${C_YELLOW}${name}${C_STD} on the region ${C_YELLOW}${region}${C_STD}"
   AWS_PROFILE=$aws_profile kube-aws destroy
   echo
 
   cd ..
-
-  # if [[ -z $kms_key_arn ]]; then
-  #   echo "WARN: fail to delete KMS, delete it manually"
-  #   return 1
-  # else
-  #   echo "Destroying the KMS ${kms_key_arn}"
-  #   aws --profile ${aws_profile} kms schedule-key-deletion --key-id ${kms_key_arn}
-  #   sed -i -e '/^KAWS_KMS=.*/d' ${CONFIG_FILE}
-  #   rm -f ${CONFIG_FILE}-e
-  #   echo
-  # fi
 }
 
 tests() {
-  export KUBECONFIG=$PWD/kube-aws/kubeconfig
+  export KUBECONFIG=${CONFIG_DIR}/kubeconfig
 
   echo -e "${C_BLUE}Cluster info:${C_STD}"
   echo kubectl cluster-info
@@ -856,7 +885,7 @@ tests() {
 }
 
 ui() {
-  export KUBECONFIG=$PWD/kube-aws/kubeconfig
+  export KUBECONFIG=${CONFIG_DIR}/kubeconfig
 
   echo "Open the dashboard at: http://localhost:8001/api/v1/namespaces/kube-system/services/https:kubernetes-dashboard:/proxy/"
   echo "Select 'Skip' to login"
@@ -881,16 +910,19 @@ usage() {
   echo "  down                      Destroy the Kubernetes cluster"
   echo "  test                      Execute some basic tests"
   echo "  ui                        Open the Kubernetes Dashboard"
-  echo "  min                       Minify the configuration file to './kube-aws/cluster.min.yaml'"
+  echo -e "  min                       Minify the configuration file to ${C_WHITEBOLD}./${DEFAULT_CONFIG_DIR_NAME}/cluster.min.yaml${C_STD}"
   echo "  clean                     Deletes all generated files"
+  echo "  clean kms                 Deletes the KMS"
+  echo "  clean s3                  Deletes S3 Bucket"
   echo
   echo -e "${C_WHITEBOLD}Flags:${C_STD}"
   echo "  -h | --help               Print this help message"
-  echo "  --debug                   Enable debug mode. By default is disabled"
+  echo "  --debug                   Enable debug mode. Or use KAWS_DEBUG. By default is disabled"
+  echo -e "  --conf-dir <path>         Directory to store all the generated files. Default is ${C_WHITEBOLD}./${DEFAULT_CONFIG_DIR_NAME}${C_STD}"
   echo -e "  --conf <filename>         Load settings from this config file. Default is ${C_WHITEBOLD}${CONFIG_FILE}${C_STD}"
-  echo -e "  --profile <aws profile>   AWS profile to use. Default ${C_WHITEBOLD}${DEFAULT_AWS_PROFILE}${C_STD}"
-  echo -e "  --cluster <cluster name>  Kubernetes cluster name. Default ${C_WHITEBOLD}${DEFAULT_CLUSTER_NAME}${C_STD}"
-  echo "  --s3 <s3 bucket name>     AWS S3 bucket name to store all the CloudFormation templates and User Data"
+  echo -e "  --profile <aws profile>   AWS profile to use. Or use AWS_PROFILE. Default ${C_WHITEBOLD}${DEFAULT_AWS_PROFILE}${C_STD}"
+  echo -e "  --cluster <cluster name>  Kubernetes cluster name. Or use KAWS_CLUSTER_NAME. Default ${C_WHITEBOLD}${DEFAULT_CLUSTER_NAME}${C_STD}"
+  echo "  --s3 <s3 bucket name>     AWS S3 bucket name to store all the CloudFormation templates and User Data. Or use KAWS_BUCKET. Default is the cluster name."
   echo 
   echo -e "${C_YELLOW}Required Parameters as Flags${C_STD}"
   echo "  --key-pair <key pair>     AWS Key Pair"
@@ -905,16 +937,16 @@ usage() {
   echo -e "It's allowed to define the environment variables in the file ${C_WHITEBOLD}${CONFIG_FILE}${C_STD}"
   echo 
   echo -e "${C_WHITEBOLD}Example of ${CONFIG_FILE}${C_STD}"
-  echo "  KAWS_KEY_NAME=kube-keypair"
-  echo "  KAWS_DOMAIN_NAME=mycompany.com"
+  echo "  KAWS_KEY_NAME=demokeypair"
+  echo "  KAWS_DOMAIN_NAME=demo.acme.com"
   echo "  # Optional:"
-  echo "  KAWS_AWS_PROFILE=mycompany"
-  echo "  KAWS_AWS_REGION=us-west-2"
-  echo "  KAWS_BUCKET=mycompany-kube-bucket"
-  echo "  KAWS_KUBERNETES_CLUSTER=mycompany-kube-cluster"
+  echo "  KAWS_CLUSTER_NAME=demo"
+  echo "  KAWS_BUCKET=acme-kube"
+  echo "  AWS_PROFILE=acme"
+  echo "  AWS_REGION=us-west-2"
   echo 
   echo -e "${C_WHITEBOLD}Quick Start${C_STD}"
-  echo "  $0 up --key-pair kube-keypair --domain mycompany.com"
+  echo "  $0 up --key-pair demokeypair --domain demo.acme.com --cluster demo"
   echo "  $0 down"
   echo "  $0 clean"
 }
@@ -943,6 +975,10 @@ while (( "$#" )); do
       source ${CONFIG_FILE}
       shift
     ;;
+    --conf-dir )
+      CONFIG_DIR=$2
+      shift
+    ;;
     --cluster ) KAWS_CLUSTER_NAME=$2 ; shift
     ;;
     --key-pair ) KAWS_KEY_NAME=$2 ; shift
@@ -965,7 +1001,24 @@ while (( "$#" )); do
     ;;
     down ) action=destroy
     ;;
-    clean ) clean ; exit 0
+    clean ) 
+      case $2 in
+        kms ) action=clean_kms
+        ;;
+        s3 ) action=clean_s3
+        ;;
+        '' ) 
+          clean
+          exit 0
+        ;;
+        * )
+          error "unknown object to deleted ${C_YELLOW}$2${C_STD}"
+          echo 
+          usage
+          exit 1
+        ;;
+      esac
+      shift
     ;;
     * ) 
       error "unknown command or flag ${C_YELLOW}$1${C_STD}"
@@ -993,7 +1046,7 @@ case ${action} in
   ;;
   create )
     setup
-    [[ ! -f ./kube-aws/cluster.yaml ]] && initialize
+    [[ ! -f ${CONFIG_DIR}/cluster.yaml ]] && initialize
     launch
   ;;
   update )
@@ -1001,23 +1054,29 @@ case ${action} in
     update
   ;;
   test )
-    [[ ! -f ./kube-aws/kubeconfig ]] && error "not found ${C_YELLOW}kubeconfig${C_STD} file. The cluster need to exists." && exit 1
+    [[ ! -f ${CONFIG_DIR}/kubeconfig ]] && error "not found ${C_YELLOW}kubeconfig${C_STD} file. The cluster need to exists." && exit 1
     tests
   ;;
   openui )
-    [[ ! -f ./kube-aws/kubeconfig ]] && error "not found ${C_YELLOW}kubeconfig${C_STD} file. The cluster need to exists." && exit 1
+    [[ ! -f ${CONFIG_DIR}/kubeconfig ]] && error "not found ${C_YELLOW}kubeconfig${C_STD} file. The cluster need to exists." && exit 1
     ui
   ;;
   destroy )
     setup
     destroy
   ;;
+  clean_kms )
+    clean_kms
+  ;;
+  clean_s3 )
+    clean_s3
+  ;;
   min )
-    if [[ ! -f ./kube-aws/cluster.yaml ]]; then
+    if [[ ! -f ${CONFIG_DIR}/cluster.yaml ]]; then
       error "not found ${C_YELLOW}cluster.yaml${C_STD} file. The cluster config file need to exists."
       exit 1
     fi
-    grep -v '^\s*#' ./kube-aws/cluster.yaml | grep -v '^\s*$' > ./kube-aws/cluster.min.yaml
+    grep -v '^\s*#' ${CONFIG_DIR}/cluster.yaml | grep -v '^\s*$' > ${CONFIG_DIR}/cluster.min.yaml
   ;;
   * ) 
     error "unknown action ${C_YELLOW}${action}${C_STD}"

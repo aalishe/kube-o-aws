@@ -1,10 +1,10 @@
 # Every config files
 *.conf
-*.conf.*
+!example/kaws.conf
 
 # Every temporal directory or file
 tmp/
-cluster.*.yaml
+cluster*.yaml
 
 # Output directories with cluster config
-kube-aws/
+kube-aws-*/
