@@ -95,17 +95,21 @@ KAWS requires an S3 Bucket so `kube-aws` can export all the CloudFormation templ
 
 If the S3 Bucket does not exists, or not provided, `kaws` will create it and saves the variable `KAWS_BUCKET` in the config file with the bucket name.
 
-## Optional: Cluster architecture
+## Optional: Cluster Size
 
 You may define how many (and where) workers, masters (controllers) and etcd nodes to create in the cluster. This is defined with the variables:
 
-    KAWS_WORKERS=
-    KAWS_MASTERS=
-    KAWS_ETCDS=
+    KAWS_CUSTER_SIZE=1:1:1
+
+The 3 values are the size (and location) for Masters (M) : Workers (W) : etcd nodes (E).
 
 The values this variables accept are:
 
-* **1:1**: This is the default option for `kube-aws`. It is one node in one AZ. For Masters and Workers, there will be a AutoScaling Group amonth all the AZ.
-* **1:N**: This option will create one node (worker, master or etcd) on each AZ (there are 3 AZ).
+* **1:1:1** = One master, one etcd in one Availability Zone. One worker per Availability Zone.
+* **1:N:1** = One master, one etcd in one Availability Zone. 1 to 3 workers per Availability Zone.
+* **N:N:1** = One etcd in one Availability Zone. 1 to 2 masters per Availability Zone. 1 to 3 workers per Availability Zone.
 
-**IMPORTANT**: The option **1:N** for etcd nodes (`KAWS_ETCDS=1:N`) is not working at this time. This will be fix in the future.
+**IMPORTANT**:
+
+* N:N:N = Is NOT WORKING. 1 etcd per AZ is not working yet and will be fix in the future
+* N:1:? = Does not exists.

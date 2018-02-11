@@ -32,14 +32,15 @@ DEFAULT_PUBLIC_SUBNET_A_CIDR=10.0.101.0/24
 DEFAULT_PUBLIC_SUBNET_B_CIDR=10.0.102.0/24
 DEFAULT_PUBLIC_SUBNET_C_CIDR=10.0.103.0/24
 
-DEFAULT_MASTERS="1:1"
-DEFAULT_WORKERS="1:N"
-DEFAULT_ETCDS="1:1"
+DEFAULT_CUSTER_SIZE="1:N:1"
 
-# 1:1 = One master/worker/etcd in one Availability Zone
-# 1:N = One master/worker/etcd per Availability Zone
-
-# ETCDS = 1:N is failing, will be fix in the future.
+# Cluster Size:
+# M:W:E = Number of Masters (M) : Workers (W) : etcd (E) nodes
+# 1:1:1 = One master, one etcd in one Availability Zone. One worker per Availability Zone.
+# 1:N:1 = One master, one etcd in one Availability Zone. 1 - 3 workers per Availability Zone.
+# N:N:1 = One etcd in one Availability Zone. 1 - 2 masters per Availability Zone. 1 - 3 workers per Availability Zone.
+# N:N:N = NOT WORKING. 1 etcd per AZ is not working yet.
+# N:1:? = Does not exists.
 
 # DEFAULT_PRIVATE_SUBNET_A_CIDR=10.0.1.0/24
 # DEFAULT_PRIVATE_SUBNET_B_CIDR=10.0.2.0/24
@@ -56,9 +57,7 @@ DEFAULT_ETCDS="1:1"
 : ${KAWS_PUBLIC_SUBNET_B_CIDR:=$DEFAULT_PUBLIC_SUBNET_B_CIDR}
 : ${KAWS_PUBLIC_SUBNET_C_CIDR:=$DEFAULT_PUBLIC_SUBNET_C_CIDR}
 
-: ${KAWS_MASTERS:=$DEFAULT_MASTERS}
-: ${KAWS_WORKERS:=$DEFAULT_WORKERS}
-: ${KAWS_ETCDS:=$DEFAULT_ETCDS}
+: ${KAWS_CUSTER_SIZE:=$DEFAULT_CUSTER_SIZE}
 
 DEFAULT_CONFIG_DIR_NAME="kube-aws-${KAWS_CLUSTER_NAME}"
 DEFAULT_CONFIG_DIR="${PWD}/${DEFAULT_CONFIG_DIR_NAME}"
@@ -153,6 +152,27 @@ check_requirements() {
     fi
   done
   [[ -n ${err} ]] && error "\nAssign a value to the following environment variables: ${err%, }\n" -ec 1
+}
+
+masters_count=
+workers_count=
+etcds_count=
+check_cluster_size() {
+  if [[ "${KAWS_CUSTER_SIZE:0:3}" == "N:1" ]]; then
+    error "cluster size cannot be multiple masters and one worker"
+    exit 1
+  fi
+
+  if [[ "${KAWS_CUSTER_SIZE:4:1}" == "N" ]]; then
+    error "cluster size with multiple etcd nodes is failing. This will be fix in the future"
+    exit 1
+  fi
+
+  masters_count=${KAWS_CUSTER_SIZE:0:1}
+  workers_count=${KAWS_CUSTER_SIZE:2:1}
+  etcds_count=${KAWS_CUSTER_SIZE:4:1}
+
+  debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}KAWS_CUSTER_SIZE${C_STD} = ${KAWS_CUSTER_SIZE} (M=${masters_count}, W=${workers_count}, E=${etcds_count})"
 }
 
 list_profiles() {
@@ -382,6 +402,8 @@ kms_key_arn=
 setup() {
   debug "Input validations:"
 
+  check_cluster_size
+
   check_profile
   aws_profile=${AWS_PROFILE}
 
@@ -415,6 +437,7 @@ setup() {
 
   mkdir -p ${CONFIG_DIR}
   echo "credentials" > ${CONFIG_DIR}/.gitignore
+  cp ${CONFIG_FILE} ${CONFIG_DIR}
 }
 
 clean() {
@@ -512,9 +535,9 @@ EOSNET
   fi
 
 
-  if [[ "${KAWS_MASTERS}" == "1:1" ]]; then
+  if [[ "${masters_count}" == "1" ]]; then
     debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Controllers:${C_STD} 1 (default: one at AZ '${availability_zone}')"
-  elif [[ "${KAWS_MASTERS}" == "1:N" ]]; then
+  elif [[ "${masters_count}" == "N" ]]; then
     debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Controllers:${C_STD} 3 (one per AZ)"
     if ! grep -q '^# KAWS: Controller config with subnets for the Kubernetes cluster$' cluster.yaml; then
       cat <<EOCTRLR >> cluster.yaml
@@ -546,9 +569,9 @@ EOCTRLR
     fi
   fi
 
-  if [[ "${KAWS_WORKERS}" == "1:1" ]]; then
+  if [[ "${workers_count}" == "1" ]]; then
     debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Worker pools:${C_STD} 1 (default: one per AZ)"
-  elif [[ "${KAWS_WORKERS}" == "1:N" ]]; then
+  elif [[ "${workers_count}" == "N" ]]; then
     debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Worker pools:${C_STD} 3 (one per AZ)"
     if ! grep -q '^# KAWS: Workers config with subnets for the Kubernetes cluster$' cluster.yaml; then
       sed -i -e '/^worker:$/s/.*/# &/' cluster.yaml
@@ -629,9 +652,9 @@ EOWRKR
     fi
   fi
 
-  if [[ "${KAWS_ETCDS}" == "1:1" ]]; then
+  if [[ "${etcds_count}" == "1" ]]; then
     debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Etcd:${C_STD} 1 (default: one at AZ '${availability_zone}')"
-  elif [[ "${KAWS_ETCDS}" == "1:N" ]]; then
+  elif [[ "${etcds_count}" == "N" ]]; then
     debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Etcd:${C_STD} 3 (one per AZ)"
     if ! grep -q '^# KAWS: Etcd config with subnets for the Kubernetes cluster$' cluster.yaml; then
       cat <<EOETCD >> cluster.yaml
@@ -668,17 +691,20 @@ EOETCD
   debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Kubernetes version:${C_STD} v1.9.1"
   sed -i -e 's/# kubernetesVersion: .*/kubernetesVersion: v1.9.1/' cluster.yaml
 
-  debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Forward logs to CloudWatch:${C_STD} enable"
-  if ! grep -q '^# KAWS: Forward logs to CloudWatch$' cluster.yaml; then
-    cat <<EOCW >> cluster.yaml
-# KAWS: Forward logs to CloudWatch
-cloudWatchLogging:
-  enabled: true
-  retentionInDays: 7
-  localStreaming:
-    enabled: true
-EOCW
-  fi
+  debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Forward logs to CloudWatch:${C_STD} disabled"
+#   debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Forward logs to CloudWatch:${C_STD} enabled"
+#   if ! grep -q '^# KAWS: Forward logs to CloudWatch$' cluster.yaml; then
+#     cat <<EOCW >> cluster.yaml
+# # KAWS: Forward logs to CloudWatch
+# cloudWatchLogging:
+#   enabled: true
+#   retentionInDays: 7
+#   localStreaming:
+#     enabled: true
+#     filter:  `{ $.priority = "CRIT" || $.priority = "WARNING" && $.transport = "journal" && $.systemdUnit = "init.scope" }`
+#     interval: 60
+# EOCW
+#   fi
 
   debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Stack tags:${C_STD} Name:Kubernetes; Environment:${environment}"
   if ! grep -q '^# KAWS: Stack tags$' cluster.yaml; then
@@ -831,6 +857,24 @@ tests() {
   kill $(ps | grep '[k]ubectl port-forward kuard' | cut -f1 -d' ')
 }
 
+minimize() {
+  if [[ ! -f ${CONFIG_DIR}/cluster.yaml ]]; then
+    error "not found ${C_YELLOW}cluster.yaml${C_STD} file. The cluster config file need to exists."
+    exit 1
+  fi
+  grep -v '^\s*#' ${CONFIG_DIR}/cluster.yaml | grep -v '^\s*$' > ${CONFIG_DIR}/cluster.min.yaml
+}
+
+copy() {
+  target=$1
+  [[ ! -d $target ]] && error "not found target directory to copy the configuration (${target})" -ec 1
+  [[ ! -d ${target}/.git ]] && error "not a git repository the target directory to copy the configuration (${target})" -ec 1
+
+  minimize
+  cp -R ${CONFIG_DIR}/* ${target}
+  cp ${CONFIG_DIR}/.gitignore ${target}
+}
+
 ui() {
   export KUBECONFIG=${CONFIG_DIR}/kubeconfig
 
@@ -936,13 +980,20 @@ while (( "$#" )); do
     ;;
     init ) action=init
     ;;
-    min ) action=min
+    min ) 
+      minimize
+      exit 0
     ;;
     up ) action=create
     ;;
     update ) action=update
     ;;
     test ) action=test
+    ;;
+    cp )
+      [[ -z $2 ]] && error "missing directory to copy the cluster configuration" -ec 1
+      copy "$2"
+      exit 0
     ;;
     ui ) action=openui
     ;;
@@ -1017,13 +1068,6 @@ case ${action} in
   ;;
   clean_s3 )
     clean_s3
-  ;;
-  min )
-    if [[ ! -f ${CONFIG_DIR}/cluster.yaml ]]; then
-      error "not found ${C_YELLOW}cluster.yaml${C_STD} file. The cluster config file need to exists."
-      exit 1
-    fi
-    grep -v '^\s*#' ${CONFIG_DIR}/cluster.yaml | grep -v '^\s*$' > ${CONFIG_DIR}/cluster.min.yaml
   ;;
   * ) 
     error "unknown action ${C_YELLOW}${action}${C_STD}"
