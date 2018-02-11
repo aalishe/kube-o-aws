@@ -8,7 +8,7 @@
 # CONFIG_FILE          | --conf       |    NO    | ./kaws.conf
 # CONFIG_DIR           | --conf-dir   |    NO    | ./kube-aws-kaws-kube
 # KAWS_CLUSTER_NAME    | --cluster    |    NO    | kaws-kube
-# KAWS_BUCKET          | --bucket     |    NO    | kaws-kube
+# KAWS_BUCKET          | --s3         |    NO    | kaws-kube
 # AWS_PROFILE          | --profile    |    NO    | default
 # AWS_REGION           |              |    NO    | us-west-2
 # KAWS_KMS             |              |    NO    |
@@ -32,6 +32,15 @@ DEFAULT_PUBLIC_SUBNET_A_CIDR=10.0.101.0/24
 DEFAULT_PUBLIC_SUBNET_B_CIDR=10.0.102.0/24
 DEFAULT_PUBLIC_SUBNET_C_CIDR=10.0.103.0/24
 
+DEFAULT_MASTERS="1:1"
+DEFAULT_WORKERS="1:N"
+DEFAULT_ETCDS="1:1"
+
+# 1:1 = One master/worker/etcd in one Availability Zone
+# 1:N = One master/worker/etcd per Availability Zone
+
+# ETCDS = 1:N is failing, will be fix in the future.
+
 # DEFAULT_PRIVATE_SUBNET_A_CIDR=10.0.1.0/24
 # DEFAULT_PRIVATE_SUBNET_B_CIDR=10.0.2.0/24
 # DEFAULT_PRIVATE_SUBNET_C_CIDR=10.0.3.0/24
@@ -46,6 +55,10 @@ DEFAULT_PUBLIC_SUBNET_C_CIDR=10.0.103.0/24
 : ${KAWS_PUBLIC_SUBNET_A_CIDR:=$DEFAULT_PUBLIC_SUBNET_A_CIDR}
 : ${KAWS_PUBLIC_SUBNET_B_CIDR:=$DEFAULT_PUBLIC_SUBNET_B_CIDR}
 : ${KAWS_PUBLIC_SUBNET_C_CIDR:=$DEFAULT_PUBLIC_SUBNET_C_CIDR}
+
+: ${KAWS_MASTERS:=$DEFAULT_MASTERS}
+: ${KAWS_WORKERS:=$DEFAULT_WORKERS}
+: ${KAWS_ETCDS:=$DEFAULT_ETCDS}
 
 DEFAULT_CONFIG_DIR_NAME="kube-aws-${KAWS_CLUSTER_NAME}"
 DEFAULT_CONFIG_DIR="${PWD}/${DEFAULT_CONFIG_DIR_NAME}"
@@ -95,9 +108,9 @@ save2conf() {
   line="${key}=${value}"
 
   if [[ ! -f ${CONFIG_FILE} ]]; then
-    echo $line > ${CONFIG_FILE}
+    echo -n "\n$line\n" > ${CONFIG_FILE}
   elif grep -q -v "${key}=" ${CONFIG_FILE}; then
-    echo $line >> ${CONFIG_FILE}
+    echo -n "\n$line\n" >> ${CONFIG_FILE}
   else
     sed -i -e "s/${key}=.*/${line}/" ${CONFIG_FILE}
     rm -f ${CONFIG_FILE}-e
@@ -117,7 +130,7 @@ check_requirements() {
       debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}${cmd}${C_STD} installed"
     fi
   done
-  [[ -n ${err} ]] && echo -ne "\nInstall the following commands: ${err%, }\n" && exit 1
+  [[ -n ${err} ]] && error "\nInstall the following commands: ${err%, }\n" -ec 1
 
   # AWS Configuration
   if [[ ! -f ~/.aws/config ]]; then
@@ -139,7 +152,7 @@ check_requirements() {
       debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}${param}${C_STD} = ${p}"
     fi
   done
-  [[ -n ${err} ]] && echo -ne "\nAssign a value to the following environment variables: ${err%, }\n" && exit 1
+  [[ -n ${err} ]] && error "\nAssign a value to the following environment variables: ${err%, }\n" -ec 1
 }
 
 list_profiles() {
@@ -324,7 +337,7 @@ check_bucket() {
   DEFAULT_BUCKET=${cluster_name}
   [[ -z ${KAWS_BUCKET} ]] && KAWS_BUCKET=${DEFAULT_BUCKET}
 
-  aws --profile ${aws_profile} s3 ls ${KAWS_BUCKET} >/dev/null 2>&1
+  aws --profile ${aws_profile} s3 ls ${KAWS_BUCKET} 2>&1 >/dev/null
   if [[ $? -ne 0 ]]; then
     [[ "${aws_region}" != "us-east-1" ]] && bucket_config="--create-bucket-configuration LocationConstraint=${aws_region}"
     aws s3api --profile ${aws_profile} --region ${aws_region} create-bucket --bucket ${KAWS_BUCKET} ${bucket_config} 2>&1 >/dev/null
@@ -347,7 +360,7 @@ check_bucket() {
 check_kms() {
   if [[ -z $KAWS_KMS ]]; then
     KAWS_KMS=$(aws --profile ${aws_profile} kms --region=${aws_region} create-key --description="Kubernetes cluster ${cluster_name} KMS key" | jq -r '.KeyMetadata | .Arn')
-    [[ -z $KAWS_KMS ]] && error "failed to create the KMS" && exit 1
+    [[ -z $KAWS_KMS ]] && error "failed to create the KMS" -ec 1
     debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}KAWS_KMS${C_STD} = ${KAWS_KMS} ${C_YELLOW}(created)${C_STD}"
     save2conf 'KAWS_KMS' ${KAWS_KMS}
     return
@@ -390,8 +403,8 @@ setup() {
   domain_name=${KAWS_DOMAIN_NAME}
   dns_name="${cluster_name}.${domain_name}"
 
-  hosted_zone_id=$(aws --profile ${aws_profile} route53 list-hosted-zones | jq -r '.HostedZones[] | select(.Name="'${domain_name}'") | .Id' | cut -d "/" -f3)
-  [[ -z $hosted_zone_id ]] && error "failed to identify the hosted zone id for ${C_YELLOW}${domain_name}${C_STD}" && exit 1
+  hosted_zone_id=$(aws --profile ${aws_profile} route53 list-hosted-zones | jq -r '.HostedZones[] | select(.Name=="'${domain_name}'.") | .Id' | cut -d "/" -f3)
+  [[ -z $hosted_zone_id ]] && error "failed to identify the hosted zone id for ${C_YELLOW}${domain_name}${C_STD}" -ec 1
   debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}hosted zone id${C_STD} = ${hosted_zone_id}"
 
   check_bucket
@@ -401,10 +414,11 @@ setup() {
   kms_key_arn=${KAWS_KMS}
 
   mkdir -p ${CONFIG_DIR}
+  echo "credentials" > ${CONFIG_DIR}/.gitignore
 }
 
 clean() {
-  rm -rf ./${CONFIG_DIR}
+  rm -rf ${CONFIG_DIR}
 }
 
 clean_kms() {
@@ -497,79 +511,13 @@ subnets:
 EOSNET
   fi
 
-  debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Etcd:${C_STD} 1 (default)"
-#   if ! grep -q '^# KAWS: Etcd config with subnets for the Kubernetes cluster$' cluster.yaml; then
-#     cat <<EOETCD >> cluster.yaml
-# # KAWS: Etcd config with subnets for the Kubernetes cluster
-# etcd:
-#   count: 1
-#   instanceType: t2.medium
-#   instanceTags:
-#     Role: etcd
-#     SubRole: Development
-#     Application: Kubernetes
-#   rootVolume:
-#     size: 30
-#     type: gp2
-#   dataVolume:
-#     size: 30
-#     type: gp2
-#     encrypted: false
-#   snapshot:
-#     automated: true
-#   disasterRecovery:
-#     automated: false
-# EOETCD
 
-# Let kube-aws create the etcd's in its own subnets
-#     cat <<EOETCD >> cluster.yaml
-# # KAWS: Etcd config with subnets for the Kubernetes cluster
-# etcd:
-#   count: 1
-#   instanceType: t2.medium
-#   instanceTags:
-#     Role: etcd
-#     SubRole: Development
-#     Application: Kubernetes
-#   rootVolume:
-#     size: 30
-#     type: gp2
-#   dataVolume:
-#     size: 30
-#     type: gp2
-#     encrypted: false
-#   subnets:
-#   - name: PublicSubnetA
-#   - name: PublicSubnetB
-#   - name: PublicSubnetC
-#   # version: 3.2.10
-#   # version: 3.3.0
-#   snapshot:
-#     automated: true
-#   disasterRecovery:
-#     automated: true
-# EOETCD
-
-  # fi
-
-  debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Controllers:${C_STD} 1 (default)"
-#   echo "Adding controller config with subnets"
-#   if ! grep -q '^# KAWS: Controller config with subnets for the Kubernetes cluster$' cluster.yaml; then
-#     cat <<EOCTRLR >> cluster.yaml
-# # KAWS: Controller config with subnets for the Kubernetes cluster
-# controller:
-#   count: 1
-#   createTimeout: PT60M
-#   instanceType: t2.medium
-#   instanceTags:
-#     Role: controller
-#     SubRole: Development
-#     Application: Kubernetes
-#   nodeLabels:
-#     kube-aws.coreos.com/role: controller
-# EOCTRLR
-
-    cat <<EOCTRLR >> cluster.yaml
+  if [[ "${KAWS_MASTERS}" == "1:1" ]]; then
+    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Controllers:${C_STD} 1 (default: one at AZ '${availability_zone}')"
+  elif [[ "${KAWS_MASTERS}" == "1:N" ]]; then
+    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Controllers:${C_STD} 3 (one per AZ)"
+    if ! grep -q '^# KAWS: Controller config with subnets for the Kubernetes cluster$' cluster.yaml; then
+      cat <<EOCTRLR >> cluster.yaml
 # KAWS: Controller config with subnets for the Kubernetes cluster
 controller:
   createTimeout: PT60M
@@ -595,15 +543,19 @@ controller:
     kube-aws.coreos.com/role: controller
 EOCTRLR
 
-  # fi
+    fi
+  fi
 
-  debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Worker pools:${C_STD} 3"
-  if ! grep -q '^# KAWS: Workers config with subnets for the Kubernetes cluster$' cluster.yaml; then
-    sed -i -e '/^worker:$/s/.*/# &/' cluster.yaml
-    sed -i -e '/  nodePools:/s/.*/# &/' cluster.yaml
-    sed -i -e '/.*# Name of this node pool. Must be unique among all the node pools in this cluster.*/s/.*/# &/' cluster.yaml
-    sed -i -e '/.*name: nodepool1.*/s/.*/# &/' cluster.yaml
-    cat <<EOWRKR >> cluster.yaml
+  if [[ "${KAWS_WORKERS}" == "1:1" ]]; then
+    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Worker pools:${C_STD} 1 (default: one per AZ)"
+  elif [[ "${KAWS_WORKERS}" == "1:N" ]]; then
+    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Worker pools:${C_STD} 3 (one per AZ)"
+    if ! grep -q '^# KAWS: Workers config with subnets for the Kubernetes cluster$' cluster.yaml; then
+      sed -i -e '/^worker:$/s/.*/# &/' cluster.yaml
+      sed -i -e '/  nodePools:/s/.*/# &/' cluster.yaml
+      sed -i -e '/.*# Name of this node pool. Must be unique among all the node pools in this cluster.*/s/.*/# &/' cluster.yaml
+      sed -i -e '/.*name: nodepool1.*/s/.*/# &/' cluster.yaml
+      cat <<EOWRKR >> cluster.yaml
 # KAWS: Workers config with subnets for the Kubernetes cluster
 worker:
   nodePools:
@@ -673,65 +625,60 @@ worker:
       nodeLabels:
         kube-aws.coreos.com/role: worker
 EOWRKR
+
+    fi
   fi
 
+  if [[ "${KAWS_ETCDS}" == "1:1" ]]; then
+    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Etcd:${C_STD} 1 (default: one at AZ '${availability_zone}')"
+  elif [[ "${KAWS_ETCDS}" == "1:N" ]]; then
+    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Etcd:${C_STD} 3 (one per AZ)"
+    if ! grep -q '^# KAWS: Etcd config with subnets for the Kubernetes cluster$' cluster.yaml; then
+      cat <<EOETCD >> cluster.yaml
+# KAWS: Etcd config with subnets for the Kubernetes cluster
+etcd:
+  count: 1
+  instanceType: t2.medium
+  instanceTags:
+    Role: etcd
+    SubRole: Development
+    Application: Kubernetes
+  rootVolume:
+    size: 30
+    type: gp2
+  dataVolume:
+    size: 30
+    type: gp2
+    encrypted: false
+  subnets:
+  - name: PublicSubnetA
+  - name: PublicSubnetB
+  - name: PublicSubnetC
+  # version: 3.2.10
+  # version: 3.3.0
+  snapshot:
+    automated: true
+  disasterRecovery:
+    automated: true
+EOETCD
 
-#     cat <<EOWRKR >> cluster.yaml
-# # KAWS: Workers config with subnets for the Kubernetes cluster
-# worker:
-#   nodePools:
-#     - name: nodepool1
-#       subnets:
-#       - name: PublicSubnetA
-#       - name: PublicSubnetB
-#       - name: PublicSubnetC
-#       iam:
-#         role:
-#           name: "workerManagedRole"
-#       instanceType: t2.medium
-#       instanceTags:
-#         Role: worker
-#         Environment: Development
-#         Application: Kubernetes
-#       rootVolume:
-#         size: 30
-#         type: gp2
-#       createTimeout: PT60M
-#       waitSignal:
-#         enabled: true
-#         maxBatchSize: 1
-#       autoScalingGroup:
-#         minSize: 1
-#         maxSize: 3
-#         rollingUpdateMinInstancesInService: 2
-#       autoscaling:
-#         clusterAutoscaler:
-#           enabled: true
-#       awsNodeLabels:
-#         enabled: true
-#       clusterAutoscalerSupport:
-#         enabled: true
-#       kube2IamSupport:
-#         enabled: true
-#       nodeLabels:
-#         kube-aws.coreos.com/role: worker
-# EOWRKR
+    fi
+  fi
 
+  debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Kubernetes version:${C_STD} v1.9.1"
+  sed -i -e 's/# kubernetesVersion: .*/kubernetesVersion: v1.9.1/' cluster.yaml
 
-#   echo "Adding Kubernetes version"
-#   sed -i -e 's/# kubernetesVersion: .*/kubernetesVersion: v1.9.1/' cluster.yaml
-
-#   echo "Enable to forward logs to CloudWatch"
-#   if ! grep -q '^# KAWS: Forward logs to CloudWatch$' cluster.yaml; then
-#     cat <<EOCW >> cluster.yaml
-# # KAWS: Forward logs to CloudWatch
-# cloudWatchLogging:
-#   enabled: true
-#   retentionInDays: 7
-#   localStreaming:
-#     enabled: true
-# EOCW
-#   fi
+  debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Forward logs to CloudWatch:${C_STD} enable"
+  if ! grep -q '^# KAWS: Forward logs to CloudWatch$' cluster.yaml; then
+    cat <<EOCW >> cluster.yaml
+# KAWS: Forward logs to CloudWatch
+cloudWatchLogging:
+  enabled: true
+  retentionInDays: 7
+  localStreaming:
+    enabled: true
+EOCW
+  fi
 
   debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Stack tags:${C_STD} Name:Kubernetes; Environment:${environment}"
   if ! grep -q '^# KAWS: Stack tags$' cluster.yaml; then
@@ -1054,11 +1001,11 @@ case ${action} in
     update
   ;;
   test )
-    [[ ! -f ${CONFIG_DIR}/kubeconfig ]] && error "not found ${C_YELLOW}kubeconfig${C_STD} file. The cluster need to exists." && exit 1
+    [[ ! -f ${CONFIG_DIR}/kubeconfig ]] && error "not found ${C_YELLOW}kubeconfig${C_STD} file. The cluster need to exists." -ec 1
     tests
   ;;
   openui )
-    [[ ! -f ${CONFIG_DIR}/kubeconfig ]] && error "not found ${C_YELLOW}kubeconfig${C_STD} file. The cluster need to exists." && exit 1
+    [[ ! -f ${CONFIG_DIR}/kubeconfig ]] && error "not found ${C_YELLOW}kubeconfig${C_STD} file. The cluster need to exists." -ec 1
     ui
   ;;
   destroy )

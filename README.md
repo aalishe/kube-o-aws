@@ -75,7 +75,7 @@ If the cluster is already running and it's required to modify it, do the require
 
 Notice that this latest method may not work for some changes (i.e. etcd modifications). More information about updates [here](https://kubernetes-incubator.github.io/kube-aws/getting-started/step-4-update.html).
 
-## Optional KMS Key
+## Optional: KMS Key
 
 Besides the requirements defined above, it's optional to provide a **KMS Key**. If not given, the script will create it for you and the config file will have this variable `KAWS_KMS` with the KMS ARN.
 
@@ -89,8 +89,23 @@ Example:
 
     KAWS_KMS=arn:aws:kms:us-east-1:xxxxxxxxx:key/xxxxxxxxxxxxxxxxxxx
 
-## Optional S3 Bucket
+## Optional: S3 Bucket
 
 KAWS requires an S3 Bucket so `kube-aws` can export all the CloudFormation templates and UserData. Define the environment variable `KAWS_BUCKET` with the bucket name or uses the flag `--s3`.
 
 If the S3 Bucket does not exists, or not provided, `kaws` will create it and saves the variable `KAWS_BUCKET` in the config file with the bucket name.
+
+## Optional: Cluster architecture
+
+You may define how many (and where) workers, masters (controllers) and etcd nodes to create in the cluster. This is defined with the variables:
+
+    KAWS_WORKERS=
+    KAWS_MASTERS=
+    KAWS_ETCDS=
+
+The values this variables accept are:
+
+* **1:1**: This is the default option for `kube-aws`. It is one node in one AZ. For Masters and Workers, there will be a AutoScaling Group amonth all the AZ.
+* **1:N**: This option will create one node (worker, master or etcd) on each AZ (there are 3 AZ).
+
+**IMPORTANT**: The option **1:N** for etcd nodes (`KAWS_ETCDS=1:N`) is not working at this time. This will be fix in the future.
