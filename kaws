@@ -107,9 +107,9 @@ save2conf() {
   line="${key}=${value}"
 
   if [[ ! -f ${CONFIG_FILE} ]]; then
-    echo -n "\n$line\n" > ${CONFIG_FILE}
+    echo -en "\n$line\n" > ${CONFIG_FILE}
   elif grep -q -v "${key}=" ${CONFIG_FILE}; then
-    echo -n "\n$line\n" >> ${CONFIG_FILE}
+    echo -en "\n$line\n" >> ${CONFIG_FILE}
   else
     sed -i -e "s/${key}=.*/${line}/" ${CONFIG_FILE}
     rm -f ${CONFIG_FILE}-e
@@ -160,11 +160,6 @@ etcds_count=
 check_cluster_size() {
   if [[ "${KAWS_CUSTER_SIZE:0:3}" == "N:1" ]]; then
     error "cluster size cannot be multiple masters and one worker"
-    exit 1
-  fi
-
-  if [[ "${KAWS_CUSTER_SIZE:4:1}" == "N" ]]; then
-    error "cluster size with multiple etcd nodes is failing. This will be fix in the future"
     exit 1
   fi
 
@@ -538,7 +533,7 @@ EOSNET
   if [[ "${masters_count}" == "1" ]]; then
     debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Controllers:${C_STD} 1 (default: one at AZ '${availability_zone}')"
   elif [[ "${masters_count}" == "N" ]]; then
-    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Controllers:${C_STD} 3 (one per AZ)"
+    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Controllers:${C_STD} 2 (1 per AZ)"
     if ! grep -q '^# KAWS: Controller config with subnets for the Kubernetes cluster$' cluster.yaml; then
       cat <<EOCTRLR >> cluster.yaml
 # KAWS: Controller config with subnets for the Kubernetes cluster
@@ -553,11 +548,9 @@ controller:
     size: 30
     type: gp2
   autoScalingGroup:
-    minSize: 1
-    maxSize: 2
-    rollingUpdateMinInstancesInService: 1
-  iam:
-    role:
+    minSize: 2
+    maxSize: 3
+    rollingUpdateMinInstancesInService: 2
   subnets:
   - name: PublicSubnetA
   - name: PublicSubnetB
@@ -570,9 +563,9 @@ EOCTRLR
   fi
 
   if [[ "${workers_count}" == "1" ]]; then
-    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Worker pools:${C_STD} 1 (default: one per AZ)"
+    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Workers:${C_STD} 1 (default: one per AZ)"
   elif [[ "${workers_count}" == "N" ]]; then
-    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Worker pools:${C_STD} 3 (one per AZ)"
+    debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Workers:${C_STD} 3 (1-3 per AZ)"
     if ! grep -q '^# KAWS: Workers config with subnets for the Kubernetes cluster$' cluster.yaml; then
       sed -i -e '/^worker:$/s/.*/# &/' cluster.yaml
       sed -i -e '/  nodePools:/s/.*/# &/' cluster.yaml
@@ -660,7 +653,7 @@ EOWRKR
       cat <<EOETCD >> cluster.yaml
 # KAWS: Etcd config with subnets for the Kubernetes cluster
 etcd:
-  count: 1
+  count: 3
   instanceType: t2.medium
   instanceTags:
     Role: etcd
@@ -677,8 +670,6 @@ etcd:
   - name: PublicSubnetA
   - name: PublicSubnetB
   - name: PublicSubnetC
-  # version: 3.2.10
-  # version: 3.3.0
   snapshot:
     automated: true
   disasterRecovery:
@@ -687,9 +678,6 @@ EOETCD
 
     fi
   fi
-
-  debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Kubernetes version:${C_STD} v1.9.1"
-  sed -i -e 's/# kubernetesVersion: .*/kubernetesVersion: v1.9.1/' cluster.yaml
 
   debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Forward logs to CloudWatch:${C_STD} disabled"
 #   debug "${C_GREEN}${I_CHECK}${C_STD}  ${C_YELLOW}Forward logs to CloudWatch:${C_STD} enabled"
@@ -745,6 +733,8 @@ initialize() {
   render
   customize
   validate_render
+  minimize
+  makefile
 }
 
 launch() {
@@ -865,6 +855,14 @@ minimize() {
   grep -v '^\s*#' ${CONFIG_DIR}/cluster.yaml | grep -v '^\s*$' > ${CONFIG_DIR}/cluster.min.yaml
 }
 
+makefile() {
+  cp Makefile.tpl ${CONFIG_DIR}/Makefile
+  kube_aws_version=$(kube-aws version)
+  sed -i -e "s/^KUBE_AWS_VERSION 	=.*/KUBE_AWS_VERSION 	= ${kube_aws_version}/" ${CONFIG_DIR}/Makefile
+  sed -i -e "s/^S3_BUCKET 	 =.*/S3_BUCKET 	 = ${bucket_name}/" ${CONFIG_DIR}/Makefile
+  rm -f ${CONFIG_DIR}/Makefile-e
+}
+
 copy() {
   target=$1
   [[ ! -d $target ]] && error "not found target directory to copy the configuration (${target})" -ec 1
@@ -872,7 +870,6 @@ copy() {
 
   minimize
   cp -R ${CONFIG_DIR}/* ${target}
-  cp ${CONFIG_DIR}/.gitignore ${target}
 }
 
 ui() {
